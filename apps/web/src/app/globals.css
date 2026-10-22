@@ -1,0 +1,25 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #08090a;
+  color: #e6e7e9;
+  font-family:
+    ui-sans-system,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a:hover {
+  background: rgba(255, 255, 255, 0.04);
+}

@@ -1,0 +1,380 @@
+// Gomly — Prisma schema (bản đầu, theo PRD MVP)
+// Multi-tenancy: mọi bảng nghiệp vụ đều có workspaceId + index.
+// Stack: PostgreSQL. Chạy kiểm chứng: `npm run validate -w @gomly/db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+
+enum MembershipRole {
+  OWNER
+  ADMIN
+  MEMBER
+  GUEST
+}
+
+enum IssueStatusGroup {
+  BACKLOG
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+  CANCELED
+}
+
+enum IssueStatus {
+  BACKLOG
+  TRIAGE
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+  CANCELED
+}
+
+enum IssuePriority {
+  NONE
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum IntakeChannel {
+  ZALO
+  SLACK
+  EMAIL
+  GITHUB
+}
+
+enum TriageStatus {
+  NEW
+  ACCEPTED
+  DISMISSED
+  MERGED
+}
+
+enum CycleStatus {
+  UPCOMING
+  ACTIVE
+  COMPLETED
+}
+
+enum ProjectStatus {
+  PLANNED
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELED
+}
+
+enum NotificationType {
+  ASSIGNED
+  MENTIONED
+  COMMENTED
+  STATUS_CHANGED
+  INTAKE_RECEIVED
+}
+
+enum IntegrationProvider {
+  ZALO
+  SLACK
+  EMAIL
+  GITHUB
+}
+
+enum IntegrationStatus {
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+// ---------- Core: Workspace / User / Membership / Team ----------
+
+model Workspace {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships   Membership[]
+  teams         Team[]
+  issues        Issue[]
+  intakeItems   IntakeItem[]
+  cycles        Cycle[]
+  projects      Project[]
+  comments      Comment[]
+  notifications Notification[]
+  integrations  IntegrationConnection[]
+  captureLinks  CaptureLink[]
+}
+
+model User {
+  id           String  @id @default(uuid())
+  email        String  @unique
+  name         String
+  passwordHash String?
+  avatarUrl    String?
+  locale       String  @default("vi")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships   Membership[]
+  refreshTokens RefreshToken[]
+  assignedIssues Issue[]       @relation("IssueAssignee")
+  createdIssues  Issue[]       @relation("IssueCreator")
+  ledProjects    Project[]     @relation("ProjectLead")
+  comments       Comment[]
+  notifications  Notification[] @relation("NotificationRecipient")
+  actedNotifications Notification[] @relation("NotificationActor")
+  createdCaptureLinks CaptureLink[] @relation("CaptureLinkCreator")
+}
+
+// Refresh token: phía server chỉ lưu HASH của token (không lưu token gốc).
+// Xoay vòng khi /auth/refresh: token cũ bị thu hồi (revokedAt), cấp token mới.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Membership {
+  id          String         @id @default(uuid())
+  workspaceId String
+  userId      String
+  role        MembershipRole @default(MEMBER)
+  createdAt   DateTime       @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+}
+
+model Team {
+  id          String   @id @default(uuid())
+  workspaceId String
+  name        String
+  key         String // VD: "ENG" — mã issue dạng ENG-123
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  issues      Issue[]
+  intakeItems IntakeItem[]
+  cycles      Cycle[]
+  captureLinks CaptureLink[]
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId])
+}
+
+// ---------- Issues ----------
+
+model Issue {
+  id           String           @id @default(uuid())
+  workspaceId  String
+  teamId       String
+  number       Int // số thứ tự trong team (ENG-<number>)
+  title        String
+  description  String?
+  status       IssueStatus      @default(BACKLOG)
+  statusGroup  IssueStatusGroup @default(BACKLOG)
+  priority     IssuePriority    @default(NONE)
+  labels       String[]         @default([])
+  estimate     Float?
+  dueDate      DateTime?
+  assigneeId   String?
+  creatorId    String?
+  projectId    String?
+  cycleId      String?
+  intakeItemId String?          @unique // issue được sinh ra từ 1 mục Triage
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  team       Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  assignee   User?       @relation("IssueAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  creator    User?       @relation("IssueCreator", fields: [creatorId], references: [id], onDelete: SetNull)
+  project    Project?    @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  cycle      Cycle?      @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+  intakeItem IntakeItem? @relation(fields: [intakeItemId], references: [id], onDelete: SetNull)
+  comments   Comment[]
+  notifications Notification[]
+
+  @@unique([teamId, number])
+  @@index([workspaceId])
+  @@index([workspaceId, statusGroup])
+  @@index([teamId])
+  @@index([assigneeId])
+  @@index([projectId])
+  @@index([cycleId])
+}
+
+// ---------- Intake hợp nhất (Triage) ----------
+
+model IntakeItem {
+  id           String        @id @default(uuid())
+  workspaceId  String
+  teamId       String?
+  channel      IntakeChannel
+  triageStatus TriageStatus  @default(NEW)
+  title        String
+  content      String?
+  senderName   String?
+  senderRef    String? // email người gửi / user id ở kênh nguồn
+  externalId   String? // id của tin nhắn/issue/email ở hệ thống nguồn
+  externalUrl  String?
+  rawPayload   Json? // bản gốc từ kênh — không được mất
+  dismissReason String? // lý do khi triageStatus = DISMISSED (do người duyệt ghi)
+  dedupeKey    String? // chống trùng khi kênh gửi lại (idempotency)
+  receivedAt   DateTime      @default(now())
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  team      Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  issue     Issue? // issue được tạo khi ACCEPTED
+
+  @@index([workspaceId])
+  @@index([workspaceId, triageStatus])
+  @@index([channel, externalId])
+  @@index([dedupeKey])
+}
+
+// ---------- Cycles & Projects ----------
+
+model Cycle {
+  id          String      @id @default(uuid())
+  workspaceId String
+  teamId      String
+  name        String
+  status      CycleStatus @default(UPCOMING)
+  startsAt    DateTime
+  endsAt      DateTime
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  team      Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  issues    Issue[]
+
+  @@index([workspaceId])
+  @@index([teamId])
+}
+
+model Project {
+  id          String        @id @default(uuid())
+  workspaceId String
+  name        String
+  description String?
+  status      ProjectStatus @default(PLANNED)
+  leadId      String?
+  targetDate  DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead      User?     @relation("ProjectLead", fields: [leadId], references: [id], onDelete: SetNull)
+  issues    Issue[]
+
+  @@index([workspaceId])
+}
+
+// ---------- Comments & Notifications ----------
+
+model Comment {
+  id          String   @id @default(uuid())
+  workspaceId String
+  issueId     String
+  authorId    String?
+  body        String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  issue     Issue     @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  author    User?     @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([issueId])
+}
+
+model Notification {
+  id          String           @id @default(uuid())
+  workspaceId String
+  userId      String // người nhận
+  actorId     String? // người gây ra thông báo
+  type        NotificationType
+  issueId     String?
+  body        String?
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  actor     User?     @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+  issue     Issue?    @relation(fields: [issueId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([userId, readAt])
+}
+
+// ---------- Quick-capture (Zalo phương án B) ----------
+
+// Link "Gửi yêu cầu" công khai của 1 workspace (ghim trong nhóm Zalo / QR code).
+// Người ngoài mở /capture/<token> và gửi form -> IntakeItem kênh ZALO vào Triage.
+// token là bí danh duy nhất của link; thu hồi bằng revokedAt (không xóa cứng để còn truy vết).
+model CaptureLink {
+  id          String    @id @default(uuid())
+  workspaceId String
+  teamId      String? // team mặc định cho yêu cầu gửi qua link này (có thể trống)
+  token       String    @unique
+  label       String? // nhãn gợi nhớ, VD "Nhóm Zalo khách ABC"
+  createdById String?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  team      Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  createdBy User?     @relation("CaptureLinkCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+}
+
+// ---------- Integrations ----------
+
+model IntegrationConnection {
+  id                   String            @id @default(uuid())
+  workspaceId          String
+  provider             IntegrationProvider
+  status               IntegrationStatus @default(ACTIVE)
+  externalAccountId    String? // id OA Zalo / workspace Slack / repo GitHub / hộp email
+  displayName          String?
+  config               Json?
+  encryptedCredentials String? // token/secret — LUÔN mã hóa khi lưu
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, provider, externalAccountId])
+  @@index([workspaceId])
+}
